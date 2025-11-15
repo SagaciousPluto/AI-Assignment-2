@@ -1,147 +1,157 @@
 import os
-import json
 import torch
-from torch.utils.data import DataLoader, TensorDataset
+import joblib
+import argparse
+from tqdm.auto import tqdm
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.metrics import accuracy_score
+from data_loader import load_data
+from preprocess import preprocess_A, preprocess_B, preprocess_C
+from model_baseline_A import get_baseline_A
+from model_baseline_B import get_baseline_B
+from model_baseline_C import get_baseline_C
+from torch.utils.data import DataLoader
 from torch.optim import AdamW
 from transformers import get_linear_schedule_with_warmup
-from tqdm import tqdm
 import torch.nn.functional as F
 import matplotlib.pyplot as plt
+import json
 
-from preprocess import *
-from model_baseline_bert import *
+parser = argparse.ArgumentParser()
+parser.add_argument("--model", type=str, default="A", choices=["A","B","C"])
+parser.add_argument("--epochs", type=int, default=3)
+parser.add_argument("--batch_size", type=int, default=8)
+args = parser.parse_args()
 
-def train_model(train_tokenized, val_tokenized, test_tokenized, 
-                train_data_labels_list, val_data_labels_list, test_data_labels_list, 
-                epochs=EPOCHS, batch_size=BATCH_SIZE, lr=LR):
+train_dir = "/kaggle/input/semeval-2026-task13/SemEval-2026-Task13/task_a/task_a_training_set_1.parquet"
+val_dir   = "/kaggle/input/semeval-2026-task13/SemEval-2026-Task13/task_a/task_a_validation_set.parquet"
+test_dir  = "/kaggle/input/semeval-2026-task13/SemEval-2026-Task13/task_a/task_a_test_set_sample.parquet"
 
-    # --- Directories ---
-    os.makedirs("/results", exist_ok=True)
-    os.makedirs("/plots", exist_ok=True)
+train_df, val_df, test_df = load_data(train_dir, val_dir, test_dir)
+os.makedirs("results", exist_ok=True)
+os.makedirs("plots", exist_ok=True)
 
-    # --- Dataset & Dataloaders ---
-    train_dataset = TensorDataset(train_tokenized['input_ids'], train_tokenized['attention_mask'], torch.tensor(train_data_labels_list))
-    val_dataset = TensorDataset(val_tokenized['input_ids'], val_tokenized['attention_mask'], torch.tensor(val_data_labels_list))
-    test_dataset = TensorDataset(test_tokenized['input_ids'], test_tokenized['attention_mask'], torch.tensor(test_data_labels_list))
+# -------------------------------
+# MODEL A
+# -------------------------------
+if args.model == "A":
+    train_df, val_df, test_df = preprocess_A(train_df, val_df, test_df)
+    y_train, y_val = train_df["label"], val_df["label"]
 
-    train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=batch_size)
-    test_loader = DataLoader(test_dataset, batch_size=batch_size)
+    vectorizer = TfidfVectorizer(analyzer='char_wb', ngram_range=(3,4), max_features=30000, sublinear_tf=True)
+    X_train = vectorizer.fit_transform(train_df["clean_code"]).astype("float32")
+    X_val   = vectorizer.transform(val_df["clean_code"]).astype("float32")
 
-    # --- Model, Optimizer, Scheduler, Loss ---
-    model = CodeBERTBaseline(num_labels=2).to(DEVICE)
-    optimizer = AdamW(model.parameters(), lr=lr)
-    total_steps = len(train_loader) * epochs
-    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=WARMUP_STEPS, num_training_steps=total_steps)
+    model = get_baseline_A()
+    model.fit(X_train, y_train, eval_set=[(X_val, y_val)], verbose=10)
+
+    val_preds = model.predict(X_val)
+    print("Validation Accuracy:", (val_preds == y_val).mean())
+
+    joblib.dump(model, "results/xgb_baseline_A.pkl")
+    joblib.dump(vectorizer, "results/tfidf_vectorizer.pkl")
+    print("✅ Model A saved.")
+
+# -------------------------------
+# MODEL B
+# -------------------------------
+elif args.model == "B":
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    train_dataset, val_dataset, test_dataset, tokenizer = preprocess_B(train_df, val_df, test_df)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
+
+    model = get_baseline_B()
+    optimizer = AdamW(model.parameters(), lr=2e-5)
+    total_steps = len(train_loader) * args.epochs
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=0, num_training_steps=total_steps)
     criterion = torch.nn.CrossEntropyLoss()
-
-    # --- Metrics storage ---
     metrics = {"train_loss": [], "val_loss": [], "val_acc": []}
 
-    # --- Training Loop ---
-    for epoch in range(epochs):
+    for epoch in range(args.epochs):
         model.train()
         total_loss = 0
-        for batch in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
-            input_ids, attention_mask, labels = [x.to(DEVICE) for x in batch]
+        for ids, attn, labels in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
+            ids, attn, labels = ids.to(DEVICE), attn.to(DEVICE), labels.to(DEVICE)
             optimizer.zero_grad()
-            logits = model(input_ids, attention_mask)
+            logits = model(ids, attn)
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
             scheduler.step()
             total_loss += loss.item()
-
         avg_train_loss = total_loss / len(train_loader)
 
-        # --- Validation ---
+        # Validation
         model.eval()
         val_loss = 0
         correct, total = 0, 0
         with torch.no_grad():
-            for batch in val_loader:
-                input_ids, attention_mask, labels = [x.to(DEVICE) for x in batch]
-                logits = model(input_ids, attention_mask)
+            for ids, attn, labels in val_loader:
+                ids, attn, labels = ids.to(DEVICE), attn.to(DEVICE), labels.to(DEVICE)
+                logits = model(ids, attn)
                 loss = criterion(logits, labels)
                 val_loss += loss.item()
                 preds = torch.argmax(F.softmax(logits, dim=1), dim=1)
                 correct += (preds == labels).sum().item()
                 total += labels.size(0)
-
-        avg_val_loss = val_loss / len(val_loader)
         val_acc = correct / total * 100
-
-        # --- Store epoch metrics ---
         metrics["train_loss"].append(avg_train_loss)
-        metrics["val_loss"].append(avg_val_loss)
+        metrics["val_loss"].append(val_loss / len(val_loader))
         metrics["val_acc"].append(val_acc)
+        print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.2f}%")
 
-        print(f"\nEpoch {epoch+1}/{epochs}")
-        print(f"Train Loss: {avg_train_loss:.4f}")
-        print(f"Val Loss: {avg_val_loss:.4f} | Val Accuracy: {val_acc:.2f}%")
+    torch.save(model.state_dict(), "results/codebert_baseline_B.pt")
 
-        # --- Save checkpoint after each epoch ---
-        ckpt_path = f"results/codebert_epoch{epoch+1}.pt"
-        torch.save(model.state_dict(), ckpt_path)
-        print(f"checkpoint: {ckpt_path}")
+# -------------------------------
+# MODEL C
+# -------------------------------
+elif args.model == "C":
+    DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
+    train_dataset, val_dataset, test_dataset, tokenizer = preprocess_C(train_df, val_df, test_df)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size)
+    test_loader = DataLoader(test_dataset, batch_size=args.batch_size)
 
-    # --- Save final model ---
-    final_path = "results/codebert_final.pt"
-    torch.save(model.state_dict(), final_path)
-    print(f"\n model saved to {final_path}")
+    model = get_baseline_C()
+    optimizer = AdamW(model.parameters(), lr=2e-5)
+    total_steps = len(train_loader) * args.epochs
+    scheduler = get_linear_schedule_with_warmup(optimizer, num_warmup_steps=total_steps//10, num_training_steps=total_steps)
+    criterion = torch.nn.CrossEntropyLoss()
+    metrics = {"train_loss": [], "val_loss": [], "val_acc": []}
 
-    # --- Final Testing ---
-    model.eval()
-    test_loss = 0
-    correct, total = 0, 0
-    with torch.no_grad():
-        for batch in tqdm(test_loader, desc="Testing"):
-            input_ids, attention_mask, labels = [x.to(DEVICE) for x in batch]
-            logits = model(input_ids, attention_mask)
+    for epoch in range(args.epochs):
+        model.train()
+        total_loss = 0
+        for ids, attn, labels in tqdm(train_loader, desc=f"Training Epoch {epoch+1}"):
+            ids, attn, labels = ids.to(DEVICE), attn.to(DEVICE), labels.to(DEVICE)
+            optimizer.zero_grad()
+            logits = model(ids, attn)
             loss = criterion(logits, labels)
-            test_loss += loss.item()
-            preds = torch.argmax(F.softmax(logits, dim=1), dim=1)
-            correct += (preds == labels).sum().item()
-            total += labels.size(0)
+            loss.backward()
+            optimizer.step()
+            scheduler.step()
+            total_loss += loss.item()
+        avg_train_loss = total_loss / len(train_loader)
 
-    avg_test_loss = test_loss / len(test_loader)
-    test_acc = correct / total * 100
+        # Validation
+        model.eval()
+        val_loss = 0
+        correct, total = 0, 0
+        with torch.no_grad():
+            for ids, attn, labels in val_loader:
+                ids, attn, labels = ids.to(DEVICE), attn.to(DEVICE), labels.to(DEVICE)
+                logits = model(ids, attn)
+                loss = criterion(logits, labels)
+                val_loss += loss.item()
+                preds = torch.argmax(F.softmax(logits, dim=1), dim=1)
+                correct += (preds == labels).sum().item()
+                total += labels.size(0)
+        val_acc = correct / total * 100
+        metrics["train_loss"].append(avg_train_loss)
+        metrics["val_loss"].append(val_loss / len(val_loader))
+        metrics["val_acc"].append(val_acc)
+        print(f"Epoch {epoch+1} - Train Loss: {avg_train_loss:.4f}, Val Loss: {val_loss/len(val_loader):.4f}, Val Acc: {val_acc:.2f}%")
 
-    print(f"\nTest Loss: {avg_test_loss:.4f} | Test Accuracy: {test_acc:.2f}%")
-
-    # metrics are saved to a json file
-    metrics["test_loss"] = avg_test_loss
-    metrics["test_acc"] = test_acc
-
-    metrics_path = "results/training_metrics.json"
-    with open(metrics_path, "w") as f:
-        json.dump(metrics, f, indent=4)
-    print(f"Metrics saved to: {metrics_path}")
-
-    # --- Plot and save metrics ---
-    plt.figure(figsize=(8,6))
-    plt.plot(metrics["train_loss"], label="Train Loss", marker="o")
-    plt.plot(metrics["val_loss"], label="Validation Loss", marker="o")
-    plt.title("Training vs Validation Loss")
-    plt.xlabel("Epoch")
-    plt.ylabel("Loss")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("/plots/loss_plot.pdf")
-    plt.close()
-
-    plt.figure(figsize=(8,6))
-    plt.plot(metrics["val_acc"], label="Validation Accuracy", color="green", marker="o")
-    plt.title("Validation Accuracy over Epochs")
-    plt.xlabel("Epoch")
-    plt.ylabel("Accuracy (%)")
-    plt.legend()
-    plt.grid(True)
-    plt.savefig("plots/accuracy_plot.pdf")
-    plt.close()
-
-    print("All processes completed.")
-
-# Example call:
-train_model(train_tokenized, val_tokenized, test_tokenized,
-            train_data_labels_list, val_data_labels_list, test_data_labels_list)
+    torch.save(model.state_dict(), "results/codebert_baseline_C.pt")
