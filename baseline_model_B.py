@@ -16,8 +16,8 @@ DEVICE = "cuda"
 
 def get_baseline_B(num_labels=2):
     class CodeBERTBaseline(nn.Module):
-        def _init_(self, num_labels):
-            super(CodeBERTBaseline, self)._init_()
+        def __init__(self, num_labels):
+            super(CodeBERTBaseline, self).__init__()
             self.codebert = RobertaModel.from_pretrained(MODEL_NAME)
             self.dropout = nn.Dropout(DROPOUT)
             self.classifier = nn.Linear(self.codebert.config.hidden_size, num_labels)
