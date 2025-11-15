@@ -1,13 +1,25 @@
-import torch
 from torch import nn
 from transformers import RobertaModel
 
+# Hyperparameters
+LR = 2e-5
+BATCH_SIZE = 8
+EPOCHS: 3
+WEIGHT_DECAY = 0.01
+WARMUP_STEPS = 0
+MAX_LENGTH = 256
+DROPOUT = 0.3
+RANDOM_SEED = 42
+MODEL_NAME = "microsoft/codebert-base"
+DEVICE = "cuda"
+
+
 class CodeBERTBaseline(nn.Module):
-    def __init__(self, label_count=2):
+    def __init__(self, num_labels=2):
         super(CodeBERTBaseline, self).__init__()
-        self.codebert = RobertaModel.from_pretrained("microsoft/codebert-base")
-        self.dropout = nn.Dropout(0.3)
-        self.classifier = nn.Linear(self.codebert.config.hidden_size, label_count)
+        self.codebert = RobertaModel.from_pretrained(MODEL_NAME)
+        self.dropout = nn.Dropout(DROPOUT)
+        self.classifier = nn.Linear(self.codebert.config.hidden_size, num_labels)
 
     def forward(self, input_ids, attention_mask):
         outputs = self.codebert(input_ids=input_ids, attention_mask=attention_mask)
