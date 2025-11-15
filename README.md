@@ -92,12 +92,7 @@ python train.py --model C --epochs 3 --batch_size 8
 python train.py --model A
 ```
 
-Trained models are saved in `results/`:
-
-* `xgb_baseline_A.pkl`
-* `tfidf_vectorizer.pkl`
-* `codebert_baseline_B.pt`
-* `codebert_baseline_C.pt`
+Trained models have not been attached because the files are too large to be uploaded on LMS or GitHub
 
 ---
 
