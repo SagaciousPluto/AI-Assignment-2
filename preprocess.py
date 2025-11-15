@@ -1,33 +1,54 @@
-import pandas as pd
-from transformers import RobertaTokenizerFast
+import re
+from tqdm.auto import tqdm
+from transformers import RobertaTokenizerFast, AutoTokenizer
+import torch
+from torch.utils.data import TensorDataset
 
-train_data = train_data[["code", "label", "language"]][:50000]
-train_data = train_data.dropna()
-train_data = train_data.drop_duplicates()
+tqdm.pandas()
 
-val_data = val_data[["code", "label", "language"]][:10000]
-val_data = val_data.dropna()
-val_data = val_data.drop_duplicates()
+# ------------------------------
+# Common cleaning
+# ------------------------------
+def clean_code(text):
+    text = str(text).lower()
+    text = re.sub(r'["\'`]+', '', text)
+    text = re.sub(r'\s+', ' ', text)
+    return text.strip()
 
-test_data = test_data[["code", "label", "language"]][:1000]
-test_data = test_data.dropna()
-test_data = test_data.drop_duplicates()
+def preprocess_A(train_df, val_df, test_df):
+    train_df['clean_code'] = train_df['code'].progress_apply(clean_code)
+    val_df['clean_code'] = val_df['code'].progress_apply(clean_code)
+    test_df['clean_code'] = test_df['code'].progress_apply(clean_code)
+    return train_df, val_df, test_df
 
-tokenizer = RobertaTokenizerFast.from_pretrained("microsoft/codebert-base")
+# ------------------------------
+# Model B: CodeBERT tokenizer
+# ------------------------------
+tokenizer_B = RobertaTokenizerFast.from_pretrained("microsoft/codebert-base")
 
-def tokenize(examples):
-    return tokenizer(
-        examples["code"].tolist(),
-        padding = "max_length",
-        truncation = True,
-        max_length = 300,
-        return_tensors="pt"
-    )
+def preprocess_B(train_df, val_df, test_df, max_length=256):
+    def tokenize(df):
+        tokens = tokenizer_B(list(df["code"]), padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
+        labels = torch.tensor(df["label"].tolist())
+        dataset = TensorDataset(tokens["input_ids"], tokens["attention_mask"], labels)
+        return dataset
+    train_dataset = tokenize(train_df)
+    val_dataset = tokenize(val_df)
+    test_dataset = tokenize(test_df)
+    return train_dataset, val_dataset, test_dataset, tokenizer_B
 
-train_tokenized = tokenize(train_data)
-val_tokenized = tokenize(val_data)
-test_tokenized = tokenize(test_data)
+# ------------------------------
+# Model C: DistilBERT tokenizer
+# ------------------------------
+tokenizer_C = AutoTokenizer.from_pretrained("distilbert-base-uncased")
 
-train_data_labels_list = train_data["label"].tolist()
-val_data_labels_list = val_data["label"].tolist()
-test_data_labels_list = test_data["label"].tolist()
+def preprocess_C(train_df, val_df, test_df, max_length=256):
+    def tokenize(df):
+        tokens = tokenizer_C(list(df["code"]), padding="max_length", truncation=True, max_length=max_length, return_tensors="pt")
+        labels = torch.tensor(df["label"].tolist())
+        dataset = TensorDataset(tokens["input_ids"], tokens["attention_mask"], labels)
+        return dataset
+    train_dataset = tokenize(train_df)
+    val_dataset = tokenize(val_df)
+    test_dataset = tokenize(test_df)
+    return train_dataset, val_dataset, test_dataset, tokenizer_C
